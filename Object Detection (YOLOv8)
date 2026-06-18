@@ -1,0 +1,99 @@
+!pip install ultralytics
+
+from google.colab import files
+uploaded = files.upload()
+
+
+import zipfile, os
+
+zip_path = list(uploaded.keys())[0]
+
+with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+    zip_ref.extractall('/content/raw')
+
+print("Done")
+
+image_extensions = ('.jpg', '.png', '.jpeg')
+
+images = []
+labels = []
+
+for root, dirs, files in os.walk('/content/raw'):
+    for file in files:
+        if file.endswith(image_extensions):
+            images.append(os.path.join(root, file))
+        elif file.endswith('.txt'):
+            labels.append(os.path.join(root, file))
+
+print("Number of photo:", len(images))
+print("Number of label:", len(labels))
+
+import shutil
+import random
+
+base = "/content/dataset"
+os.makedirs(f"{base}/images/train", exist_ok=True)
+os.makedirs(f"{base}/images/val", exist_ok=True)
+os.makedirs(f"{base}/labels/train", exist_ok=True)
+os.makedirs(f"{base}/labels/val", exist_ok=True)
+
+
+pairs = []
+
+for img_path in images:
+    name = os.path.splitext(os.path.basename(img_path))[0]
+
+
+    label_match = None
+    for lbl in labels:
+        if os.path.splitext(os.path.basename(lbl))[0] == name:
+            label_match = lbl
+            break
+
+    if label_match:
+        pairs.append((img_path, label_match))
+
+print("Number of pairs:", len(pairs))
+
+
+random.shuffle(pairs)
+split = int(0.8 * len(pairs))
+
+train_pairs = pairs[:split]
+val_pairs = pairs[split:]
+
+
+for img, lbl in train_pairs:
+    shutil.copy(img, f"{base}/images/train")
+    shutil.copy(lbl, f"{base}/labels/train")
+
+for img, lbl in val_pairs:
+    shutil.copy(img, f"{base}/images/val")
+    shutil.copy(lbl, f"{base}/labels/val")
+
+print("Dataset is Done")
+print("Train images:", len(os.listdir(f"{base}/images/train")))
+print("Val images:", len(os.listdir(f"{base}/images/val")))
+
+data_yaml = """
+train: /content/dataset/images/train
+val: /content/dataset/images/val
+
+nc: 4
+names: ['glioma', 'meningioma', 'no_tumor', 'pituitary']
+"""
+
+with open('/content/data.yaml', 'w') as f:
+    f.write(data_yaml)
+
+print("✔️ data.yaml ")
+
+from ultralytics import YOLO
+
+model = YOLO('yolov8s.pt')
+
+model.train(
+    data='/content/data.yaml',
+    epochs=50,
+    imgsz=320
+)
