@@ -1,0 +1,136 @@
+from ultralytics import YOLO
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import confusion_matrix, classification_report
+
+# ==============================
+# 1. Train YOLOv8n Classification
+# ==============================
+
+model = YOLO("yolov8n-cls.pt")
+
+model.train(
+    data=dataset_path,
+    epochs=50,
+    imgsz=224,
+    batch=50,
+    workers=2,
+    lr0=0.001,
+    cache=True
+)
+
+# ==============================
+# 2. Load Best Model
+# ==============================
+
+best_model_path = "/content/runs/classify/train/weights/best.pt"
+best_model = YOLO(best_model_path)
+
+print("Best YOLOv8n classification model loaded successfully.")
+
+# ==============================
+# 3. Evaluate on Validation Set
+# ==============================
+
+y_true = []
+y_pred = []
+y_score = []
+
+val_path = os.path.join(dataset_path, "val")
+image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+for true_class in class_names:
+    class_folder = os.path.join(val_path, true_class)
+
+    for img_file in os.listdir(class_folder):
+        if img_file.lower().endswith(image_extensions):
+            img_path = os.path.join(class_folder, img_file)
+
+            result = best_model.predict(
+                source=img_path,
+                imgsz=224,
+                verbose=False
+            )[0]
+
+            pred_id = int(result.probs.top1)
+            pred_class = class_names[pred_id]
+            probs = result.probs.data.cpu().numpy()
+
+            y_true.append(true_class)
+            y_pred.append(pred_class)
+            y_score.append(probs)
+
+y_score = np.array(y_score)
+
+# ==============================
+# 4. Confusion Matrix
+# ==============================
+
+cm = confusion_matrix(y_true, y_pred, labels=class_names)
+
+cm_df = pd.DataFrame(
+    cm,
+    index=[f"True_{c}" for c in class_names],
+    columns=[f"Pred_{c}" for c in class_names]
+)
+
+print("Confusion Matrix:")
+display(cm_df)
+
+# ==============================
+# 5. Classification Report
+# ==============================
+
+report = classification_report(
+    y_true,
+    y_pred,
+    labels=class_names,
+    target_names=class_names,
+    output_dict=True
+)
+
+report_df = pd.DataFrame(report).transpose()
+
+print("Classification Report:")
+display(report_df)
+
+# ==============================
+# 6. Accuracy Curve
+# ==============================
+
+results_path = "/content/runs/classify/train/results.csv"
+
+if os.path.exists(results_path):
+    results_df = pd.read_csv(results_path)
+    results_df.columns = results_df.columns.str.strip()
+
+    plt.figure(figsize=(8, 6))
+
+    if "metrics/accuracy_top1" in results_df.columns:
+        plt.plot(
+            results_df["epoch"],
+            results_df["metrics/accuracy_top1"],
+            marker="o",
+            label="Validation Accuracy"
+        )
+
+    if "metrics/accuracy_top5" in results_df.columns:
+        plt.plot(
+            results_df["epoch"],
+            results_df["metrics/accuracy_top5"],
+            marker="o",
+            label="Top-5 Accuracy"
+        )
+
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.title("YOLOv8n-cls Training and Validation Accuracy")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig("/content/yolo_accuracy_curve.png", dpi=300, bbox_inches="tight")
+    plt.show()
+else:
+    print("results.csv file was not found.")
