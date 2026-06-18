@@ -1,0 +1,108 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Dropout, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import (EarlyStopping, ReduceLROnPlateau,
+                                        ModelCheckpoint)
+from sklearn.metrics import classification_report, confusion_matrix
+
+train_dir  = "/content/Train"
+val_dir    = "/content/Val"
+IMG_SIZE   = (224, 224)
+BATCH_SIZE = 32
+SEED       = 42
+
+# Load datasets
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    train_dir, label_mode="categorical",
+    image_size=IMG_SIZE, batch_size=BATCH_SIZE,
+    shuffle=True, seed=SEED
+)
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    val_dir, label_mode="categorical",
+    image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=False
+)
+class_names = train_ds.class_names
+num_classes = len(class_names)
+print("Classes:", class_names)
+
+AUTOTUNE = tf.data.AUTOTUNE
+
+# Data augmentation
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.RandomFlip("horizontal"),
+    tf.keras.layers.RandomRotation(0.05),
+    tf.keras.layers.RandomZoom(0.1),
+])
+
+def prepare(ds, training=False):
+    ds = ds.map(lambda x, y: (tf.cast(x, tf.float32), y),
+                num_parallel_calls=AUTOTUNE)
+    if training:
+        ds = ds.map(
+            lambda x, y: (data_augmentation(x, training=True), y),
+            num_parallel_calls=AUTOTUNE)
+    ds = ds.map(lambda x, y: (preprocess_input(x), y),
+                num_parallel_calls=AUTOTUNE)
+    return ds.prefetch(AUTOTUNE)
+
+train_ds = prepare(train_ds, training=True)
+val_ds   = prepare(val_ds, training=False)
+
+# Build model with frozen ResNet50 backbone
+base_model = ResNet50(weights="imagenet", include_top=False,
+                      input_shape=(224, 224, 3))
+base_model.trainable = False
+
+inputs  = Input(shape=(224, 224, 3))
+x       = base_model(inputs, training=False)
+x       = GlobalAveragePooling2D()(x)
+x       = Dense(256, activation="relu")(x)
+x       = Dropout(0.4)(x)
+outputs = Dense(num_classes, activation="softmax")(x)
+model   = Model(inputs, outputs)
+
+model.compile(optimizer=Adam(learning_rate=1e-3),
+              loss="categorical_crossentropy",
+              metrics=["accuracy"])
+
+callbacks = [
+    EarlyStopping(monitor="val_loss", patience=5,
+                  restore_best_weights=True),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.2,
+                     patience=2, min_lr=1e-6),
+    ModelCheckpoint("best_resnet50.keras",
+                    monitor="val_accuracy",
+                    save_best_only=True, mode="max")
+]
+
+# Stage 1: Feature extraction
+history1 = model.fit(train_ds, validation_data=val_ds,
+                     epochs=10, callbacks=callbacks)
+
+# Stage 2: Fine-tune last 30 layers
+base_model.trainable = True
+for layer in base_model.layers[:-30]:
+    layer.trainable = False
+
+model.compile(optimizer=Adam(learning_rate=1e-5),
+              loss="categorical_crossentropy",
+              metrics=["accuracy"])
+history2 = model.fit(train_ds, validation_data=val_ds,
+                     epochs=5, callbacks=callbacks)
+
+# Evaluation
+val_loss, val_acc = model.evaluate(val_ds)
+print("Validation Accuracy:", val_acc)
+
+y_true = np.concatenate([y.numpy() for _, y in val_ds], axis=0)
+y_true = np.argmax(y_true, axis=1)
+
+y_pred_probs = model.predict(val_ds)
+y_pred       = np.argmax(y_pred_probs, axis=1)
+
+print(classification_report(y_true, y_pred, target_names=class_names))
+print(confusion_matrix(y_true, y_pred))
